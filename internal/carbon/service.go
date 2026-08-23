@@ -97,13 +97,10 @@ func (s *Service) Approve(ctx context.Context, tenantID, actorID, reportID strin
 		if err := audit(tx, tenantID, actorID, "carbon_report", reportID, "approve", requestID, "approved"); err != nil {
 			return err
 		}
-		return nil
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		return s.outbox.EnqueueTx(ctx, tx, tenantID, "carbon_report.approved", reportID, `{"status":"approved"}`, now)
 	})
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	return s.outbox.Enqueue(ctx, tenantID, "carbon_report.approved", reportID, `{"status":"approved"}`, now)
+	return err
 }
 
 func audit(tx *sql.Tx, tenantID, actorID, typ, id, action, requestID, details string) error {

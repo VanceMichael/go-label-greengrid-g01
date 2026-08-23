@@ -83,3 +83,31 @@ func TestCarbonVersionConflictKeepsDraft(t *testing.T) {
 		t.Fatalf("status=%s", status)
 	}
 }
+
+// TestApproveRollsBackWhenOutboxEnqueueFails asserts the persistence
+// boundary: the approval and its outbox event must commit atomically. If the
+// outbox enqueue fails, the report must remain draft rather than approved.
+func TestApproveRollsBackWhenOutboxEnqueueFails(t *testing.T) {
+	s, tenant, ops, c, n := carbonFixture(t)
+	ctx := context.Background()
+	start := time.Now().UTC()
+	_, _ = s.Telemetry.Record(ctx, tenant, n.ID, 1, start, 500, .9, "r")
+	report, _ := s.Carbon.Generate(ctx, tenant, c.ID, start, start.Add(time.Hour), ops.ID, "r")
+
+	// Drop the outbox table so the in-transaction enqueue fails. Because the
+	// outbox write now runs inside the approval transaction, the whole
+	// transaction must roll back.
+	if _, err := s.Store.DB().Exec(`DROP TABLE outbox_events`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Carbon.Approve(ctx, tenant, ops.ID, report.ID, 1, "approve"); err == nil {
+		t.Fatal("expected approve to fail when outbox enqueue fails")
+	}
+
+	var status string
+	_ = s.Store.DB().QueryRow(`SELECT status FROM carbon_reports WHERE id=?`, report.ID).Scan(&status)
+	if status != "draft" {
+		t.Fatalf("report leaked approved state after outbox failure: status=%s", status)
+	}
+}

@@ -25,8 +25,22 @@ func NewService(store *sqlite.Store, maxAttempts int) *Service {
 }
 
 func (s *Service) Enqueue(ctx context.Context, tenantID, kind, aggregateID, payload, now string) error {
-	_, err := s.store.DB().ExecContext(ctx, `INSERT INTO outbox_events(id,tenant_id,kind,aggregate_id,payload,status,attempts,next_attempt_at,created_at) VALUES(?,?,?,?,?,'pending',0,?,?)`, uuid.NewString(), tenantID, kind, aggregateID, payload, now, now)
+	return s.EnqueueTx(ctx, s.store.DB(), tenantID, kind, aggregateID, payload, now)
+}
+
+// EnqueueTx writes the outbox event using the given executor, which may be a
+// *sql.DB or a *sql.Tx owned by the caller. Callers that mutate durable state
+// in a transaction should use EnqueueTx with that transaction so the event is
+// committed atomically with the state change: if the enqueue fails, the state
+// change rolls back instead of leaving an approved report with no event.
+func (s *Service) EnqueueTx(ctx context.Context, exec ExecContext, tenantID, kind, aggregateID, payload, now string) error {
+	_, err := exec.ExecContext(ctx, `INSERT INTO outbox_events(id,tenant_id,kind,aggregate_id,payload,status,attempts,next_attempt_at,created_at) VALUES(?,?,?,?,?,'pending',0,?,?)`, uuid.NewString(), tenantID, kind, aggregateID, payload, now, now)
 	return err
+}
+
+// ExecContext is the subset of *sql.DB and *sql.Tx used for transactional writes.
+type ExecContext interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 func (s *Service) Claim(ctx context.Context, owner string, now time.Time) (domain.OutboxEvent, error) {
