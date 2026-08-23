@@ -55,13 +55,13 @@ func (s *Service) AddNode(ctx context.Context, actorID, tenantID, clusterID, nam
 			}
 			return fmt.Errorf("insert node: %w", err)
 		}
+		if err := audit(tx, tenantID, actorID, "node", node.ID, "register", requestID, "ready"); err != nil {
+			return fmt.Errorf("audit node: %w", err)
+		}
 		return nil
 	})
 	if err != nil {
 		return domain.Node{}, err
-	}
-	if err := s.store.RecordAudit(ctx, tenantID, actorID, "node", node.ID, "register", requestID, "ready"); err != nil {
-		return domain.Node{}, fmt.Errorf("audit node: %w", err)
 	}
 	return node, nil
 }

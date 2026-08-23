@@ -66,6 +66,32 @@ func TestClusterAndNodeTenantIsolation(t *testing.T) {
 	}
 }
 
+func TestAddNodeAuditFailureLeavesNoNode(t *testing.T) {
+	s := clusterServices(t)
+	ctx := context.Background()
+	tenant, _ := s.Identity.CreateTenant(ctx, "green-tenant")
+	ops, _ := s.Identity.CreateUser(ctx, tenant, "ops@example.com", "Ops", "secret", domain.RoleClusterOps)
+	c, _ := s.Cluster.CreateCluster(ctx, tenant, "horqin-a", "inner-mongolia", 16)
+
+	// Force the audit write to fail by removing the audit_events table.
+	if _, err := s.Store.DB().ExecContext(ctx, `DROP TABLE audit_events`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Cluster.AddNode(ctx, ops.ID, tenant, c.ID, "gpu-01", 8, "request"); err == nil {
+		t.Fatal("expected AddNode to fail when audit write fails")
+	}
+
+	// The node must not persist without an audit record.
+	var nodeCount int
+	if err := s.Store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&nodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if nodeCount != 0 {
+		t.Fatalf("expected 0 nodes left after audit failure, got %d", nodeCount)
+	}
+}
+
 func TestClusterCapacityConditions(t *testing.T) {
 	s := clusterServices(t)
 	ctx := context.Background()
