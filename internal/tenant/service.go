@@ -36,25 +36,29 @@ func (s *Service) Rename(ctx context.Context, tenantID, name string) error {
 	return nil
 }
 func (s *Service) Suspend(ctx context.Context, tenantID, actorID, requestID string) error {
-	var status string
-	if err := s.store.DB().QueryRowContext(ctx, `SELECT status FROM tenants WHERE id=?`, tenantID).Scan(&status); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.ErrNotFound
-		}
-		return err
-	}
-	if status != "active" {
-		return domain.ErrState
-	}
-	if _, err := s.store.DB().ExecContext(ctx, `UPDATE tenants SET status='suspended' WHERE id=? AND status='active'`, tenantID); err != nil {
-		return err
-	}
-	identities := identity.NewService(s.store, 8*time.Hour)
-	if err := identities.SuspendTenantIdentities(ctx, tenantID); err != nil {
-		return err
-	}
 	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO audit_events(id,tenant_id,actor_id,aggregate_type,aggregate_id,action,result,request_id,details,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), tenantID, actorID, "tenant", tenantID, "suspend", "success", requestID, "tenant and identities suspended", time.Now().UTC().Format(time.RFC3339Nano))
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM tenants WHERE id=?`, tenantID).Scan(&status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.ErrNotFound
+			}
+			return err
+		}
+		if status != "active" {
+			return domain.ErrState
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE tenants SET status='suspended' WHERE id=? AND status='active'`, tenantID)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return domain.ErrState
+		}
+		identities := identity.NewService(s.store, 8*time.Hour)
+		if err := identities.SuspendTenantIdentitiesTx(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT INTO audit_events(id,tenant_id,actor_id,aggregate_type,aggregate_id,action,result,request_id,details,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), tenantID, actorID, "tenant", tenantID, "suspend", "success", requestID, "tenant and identities suspended", time.Now().UTC().Format(time.RFC3339Nano))
 		return err
 	})
 }

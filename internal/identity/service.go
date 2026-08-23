@@ -170,6 +170,21 @@ func (s *Service) SuspendTenantIdentities(ctx context.Context, tenantID string) 
 	return nil
 }
 
+// SuspendTenantIdentitiesTx applies the same identity suspension as SuspendTenantIdentities
+// but within a caller-supplied transaction. Composing it with the tenant status change and the
+// audit event in a single transaction makes the suspend workflow atomic: if the audit write
+// fails, the tenant status and identity state roll back together so no half-finished seal is
+// left behind and both the tenant and its identities remain recoverable.
+func (s *Service) SuspendTenantIdentitiesTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET active=0 WHERE tenant_id=?`, tenantID); err != nil {
+		return fmt.Errorf("suspend tenant users: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET revoked=1 WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)`, tenantID); err != nil {
+		return fmt.Errorf("suspend tenant sessions: %w", err)
+	}
+	return nil
+}
+
 func hashToken(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	encoded := hex.EncodeToString(digest[:])
