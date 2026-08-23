@@ -153,7 +153,10 @@ func (r *Reconciler) RepairExpiredLeases(ctx context.Context, tenantID string, n
 	if _, err := r.CheckTenant(ctx, tenantID); err != nil {
 		return 0, err
 	}
-	result, err := r.store.DB().ExecContext(ctx, `DELETE FROM leases WHERE resource_id IN (SELECT j.id FROM jobs j WHERE j.tenant_id=?)`, tenantID)
+	// Only delete leases that are still expired at delete time. A worker that
+	// renewed an expiring lease between the reconcile scan and this statement
+	// pushed expires_at past now, so its live lease is not matched here.
+	result, err := r.store.DB().ExecContext(ctx, `DELETE FROM leases WHERE expires_at<=? AND resource_id IN (SELECT j.id FROM jobs j WHERE j.tenant_id=?)`, now.UTC().Format(time.RFC3339Nano), tenantID)
 	if err != nil {
 		return 0, err
 	}

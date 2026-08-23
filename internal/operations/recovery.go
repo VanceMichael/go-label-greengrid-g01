@@ -36,17 +36,43 @@ func (r *RecoveryService) RecoverJobs(ctx context.Context, tenantID, actorID, re
 	}
 	var actions []RecoveryAction
 	for _, candidate := range candidates {
-		action, err := r.recoverOne(ctx, tenantID, actorID, requestID, candidate.id, candidate.status)
+		action, err := r.recoverOne(ctx, tenantID, actorID, requestID, candidate.id, candidate.status, now)
 		if err != nil {
+			// ErrLeaseHeld means the lease was renewed between the scan and
+			// the recovery transaction; the job is no longer expired, so
+			// skip it rather than aborting the whole batch.
+			if errors.Is(err, domain.ErrLeaseHeld) {
+				action = RecoveryAction{ResourceType: "job", ResourceID: candidate.id, PreviousStatus: candidate.status, NextStatus: candidate.status, Reason: "lease renewed during recovery", Applied: false}
+				actions = append(actions, action)
+				continue
+			}
 			return nil, err
 		}
 		actions = append(actions, action)
 	}
 	return actions, rows.Err()
 }
-func (r *RecoveryService) recoverOne(ctx context.Context, tenantID, actorID, requestID, id, status string) (RecoveryAction, error) {
+func (r *RecoveryService) recoverOne(ctx context.Context, tenantID, actorID, requestID, id, status string, now time.Time) (RecoveryAction, error) {
 	action := RecoveryAction{ResourceType: "job", ResourceID: id, PreviousStatus: status, NextStatus: "queued", Reason: "lease expired"}
 	err := r.store.WithTx(ctx, func(tx *sql.Tx) error {
+		// Re-check expiry inside the recovery transaction. A worker that
+		// renewed the lease between the scan and this statement pushed
+		// expires_at past now; the live lease must be left in place and
+		// the job must not be requeued. Signal skip via ErrLeaseHeld.
+		var expires string
+		switch err := tx.QueryRowContext(ctx, `SELECT expires_at FROM leases WHERE resource_type='job' AND resource_id=?`, id).Scan(&expires); {
+		case errors.Is(err, sql.ErrNoRows):
+			return domain.ErrNotFound
+		case err != nil:
+			return err
+		}
+		t, err := time.Parse(time.RFC3339Nano, expires)
+		if err != nil {
+			return err
+		}
+		if t.After(now) {
+			return domain.ErrLeaseHeld
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status='queued',version=version+1 WHERE id=? AND tenant_id=? AND status IN ('claimed','running')`, id, tenantID)
 		if err != nil {
 			return err
@@ -55,7 +81,7 @@ func (r *RecoveryService) recoverOne(ctx context.Context, tenantID, actorID, req
 		if n != 1 {
 			return domain.ErrConflict
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND resource_id=?`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND resource_id=? AND expires_at<=?`, id, now.UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 		_, err = tx.Exec(`INSERT INTO audit_events(id,tenant_id,actor_id,aggregate_type,aggregate_id,action,result,request_id,details,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("recovery-%d", time.Now().UnixNano()), tenantID, actorID, "job", id, "recover_lease", "success", requestID, "expired lease returned job to queue", time.Now().UTC().Format(time.RFC3339Nano))
