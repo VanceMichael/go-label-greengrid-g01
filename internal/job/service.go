@@ -135,7 +135,7 @@ func (s *Service) Start(ctx context.Context, workerID, jobID string, expectedVer
 func (s *Service) Finish(ctx context.Context, workerID, jobID string, expectedVersion int64, success bool, message, requestID string) error {
 	var tenantID, status, owner string
 	var attemptNo int
-	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		if err := tx.QueryRowContext(ctx, `SELECT tenant_id,status,attempts FROM jobs WHERE id=?`, jobID).Scan(&tenantID, &status, &attemptNo); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.ErrNotFound
@@ -156,6 +156,10 @@ func (s *Service) Finish(ctx context.Context, workerID, jobID string, expectedVe
 		if err := domain.JobTransition(from, to); err != nil {
 			return err
 		}
+		// The terminal transition, lease release, attempt record, and audit
+		// event must commit together. Splitting them across transactions
+		// leaves the job in a terminal state while the lease is still held
+		// and the execution history is missing.
 		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status=?,version=version+1,finished_at=? WHERE id=? AND version=? AND status=?`, to, time.Now().UTC().Format(time.RFC3339Nano), jobID, expectedVersion, status)
 		if err != nil {
 			return err
@@ -164,16 +168,10 @@ func (s *Service) Finish(ctx context.Context, workerID, jobID string, expectedVe
 		if changed != 1 {
 			return domain.ErrConflict
 		}
-		status = string(to)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND resource_id=? AND owner=?`, jobID, workerID); err != nil {
 			return err
 		}
+		status = string(to)
 		if err := persistAttempt(ctx, tx, jobID, attemptNo, workerID, status, message); err != nil {
 			return err
 		}

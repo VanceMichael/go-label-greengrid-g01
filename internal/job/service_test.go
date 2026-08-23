@@ -179,3 +179,39 @@ func TestJobStateRejectsFinishBeforeStart(t *testing.T) {
 		t.Fatalf("finish queued err=%v", err)
 	}
 }
+
+func TestJobFinishAtomicWhenAttemptPersistFails(t *testing.T) {
+	s, tenant, u, r := activeJobFixture(t)
+	ctx := context.Background()
+	j, _ := s.Job.Submit(ctx, tenant, r.ID, "", "model", 1, u.ID, "submit")
+	claimed, _ := s.Job.Claim(ctx, "worker", time.Now().UTC())
+	if err := s.Job.Start(ctx, "worker", j.ID, claimed.Version); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed a conflicting attempt row so persistAttempt's insert violates
+	// the UNIQUE(job_id, attempt_no) constraint and fails. The terminal
+	// transition and lease delete would otherwise succeed, so this isolates the
+	// execution history write failure that must roll back the whole finish.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.Store.DB().Exec(`INSERT INTO job_attempts(id,job_id,attempt_no,worker_id,status,started_at,finished_at) VALUES(?,?,?,?,?,?,?)`,
+		"preseed", j.ID, claimed.Attempts, "worker", "running", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Job.Finish(ctx, "worker", j.ID, claimed.Version+1, true, "", "finish"); err == nil {
+		t.Fatal("finish succeeded despite attempt persist failure")
+	}
+	got, _ := s.Job.Get(ctx, tenant, j.ID)
+	if got.Status != domain.JobRunning {
+		t.Fatalf("job leaked to terminal status=%s while execution history write failed", got.Status)
+	}
+	var leases int
+	_ = s.Store.DB().QueryRow(`SELECT COUNT(*) FROM leases WHERE resource_id=?`, j.ID).Scan(&leases)
+	if leases != 1 {
+		t.Fatalf("lease released despite failed finish=%d", leases)
+	}
+	var finishAudits int
+	_ = s.Store.DB().QueryRow(`SELECT COUNT(*) FROM audit_events WHERE aggregate_id=? AND action='finish'`, j.ID).Scan(&finishAudits)
+	if finishAudits != 0 {
+		t.Fatalf("finish audit committed despite rollback=%d", finishAudits)
+	}
+}
