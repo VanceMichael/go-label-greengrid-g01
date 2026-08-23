@@ -22,10 +22,9 @@ func (s *Service) Acquire(ctx context.Context, typ, id, owner string, now, ttl t
 		return Lease{}, fmt.Errorf("%w: lease", domain.ErrInvalid)
 	}
 	var out Lease
-	leaseContext := acquisitionContext(ctx)
-	err := s.store.WithTx(leaseContext, func(tx *sql.Tx) error {
+	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		var currentOwner, expires string
-		err := tx.QueryRowContext(leaseContext, `SELECT owner,expires_at FROM leases WHERE resource_type=? AND resource_id=?`, typ, id).Scan(&currentOwner, &expires)
+		err := tx.QueryRowContext(ctx, `SELECT owner,expires_at FROM leases WHERE resource_type=? AND resource_id=?`, typ, id).Scan(&currentOwner, &expires)
 		if err == nil {
 			t, _ := time.Parse(time.RFC3339Nano, expires)
 			if t.After(now) {
@@ -35,7 +34,7 @@ func (s *Service) Acquire(ctx context.Context, typ, id, owner string, now, ttl t
 			return err
 		}
 		out = Lease{ResourceType: typ, ResourceID: id, Owner: owner, ExpiresAt: ttl.UTC()}
-		_, err = tx.ExecContext(leaseContext, `INSERT INTO leases(resource_type,resource_id,owner,expires_at) VALUES(?,?,?,?) ON CONFLICT(resource_type,resource_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at`, typ, id, owner, out.ExpiresAt.Format(time.RFC3339Nano))
+		_, err = tx.ExecContext(ctx, `INSERT INTO leases(resource_type,resource_id,owner,expires_at) VALUES(?,?,?,?) ON CONFLICT(resource_type,resource_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at`, typ, id, owner, out.ExpiresAt.Format(time.RFC3339Nano))
 		return err
 	})
 	return out, err
