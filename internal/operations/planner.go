@@ -94,11 +94,11 @@ func (p *Planner) ReserveNodes(ctx context.Context, tenantID, clusterID string, 
 		if remaining != 0 {
 			return domain.ErrCapacity
 		}
+		if err := recordPlanAudit(ctx, tx, tenantID, actorID, clusterID, gpu, requestID); err != nil {
+			return fmt.Errorf("audit node reserve: %w", err)
+		}
 		return nil
 	})
-	if err == nil {
-		err = recordPlanAudit(ctx, p.store.DB(), tenantID, actorID, clusterID, gpu, requestID)
-	}
 	return plan, err
 }
 func SortCandidates(nodes []CandidateNode) {
