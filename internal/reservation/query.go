@@ -61,8 +61,7 @@ func (q *Query) List(ctx context.Context, tenantID, status string, page paginati
 	return pagination.Result[Summary]{Items: out, Meta: pagination.Meta{Total: total, Limit: page.Limit, Offset: page.Offset}}, rows.Err()
 }
 func (q *Query) ActiveAt(ctx context.Context, tenantID, clusterID string, at time.Time) ([]Summary, error) {
-	queryContext := activeReservationContext(ctx)
-	rows, err := q.store.DB().QueryContext(queryContext, `SELECT id,cluster_id,gpu_count,status,starts_at,ends_at,version FROM reservations WHERE tenant_id=? AND cluster_id=? AND status IN ('requested','approved','active') AND starts_at<=? AND ends_at>? ORDER BY starts_at`, tenantID, clusterID, at.UTC().Format(time.RFC3339Nano), at.UTC().Format(time.RFC3339Nano))
+	rows, err := q.store.DB().QueryContext(ctx, `SELECT id,cluster_id,gpu_count,status,starts_at,ends_at,version FROM reservations WHERE tenant_id=? AND cluster_id=? AND status IN ('requested','approved','active') AND starts_at<=? AND ends_at>? ORDER BY starts_at`, tenantID, clusterID, at.UTC().Format(time.RFC3339Nano), at.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
