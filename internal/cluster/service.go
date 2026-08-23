@@ -117,8 +117,28 @@ func (s *Service) ReleaseCapacity(tx *sql.Tx, clusterID string, gpu int) error {
 	return nil
 }
 
+// SetMaintenance flips a ready node to maintenance as a standalone
+// autocommit write. Prefer SetMaintenanceTx when the caller must pair the
+// transition with dependent writes (e.g. audit) so the whole operation can
+// be rolled back atomically on failure.
 func (s *Service) SetMaintenance(ctx context.Context, tenantID, nodeID string) error {
 	result, err := s.store.DB().ExecContext(ctx, `UPDATE nodes SET status='maintenance',version=version+1 WHERE id=? AND status='ready' AND cluster_id IN (SELECT id FROM clusters WHERE tenant_id=?)`, nodeID, tenantID)
+	if err != nil {
+		return fmt.Errorf("set node maintenance: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
+		return domain.ErrConflict
+	}
+	return nil
+}
+
+// SetMaintenanceTx performs the ready->maintenance transition within the
+// caller's transaction. Pairing the status change with dependent writes (the
+// maintenance audit event) in one tx guarantees that an audit-write failure
+// rolls the node back to ready, leaving the capacity and node state retryable.
+func (s *Service) SetMaintenanceTx(tx *sql.Tx, tenantID, nodeID string) error {
+	result, err := tx.Exec(`UPDATE nodes SET status='maintenance',version=version+1 WHERE id=? AND status='ready' AND cluster_id IN (SELECT id FROM clusters WHERE tenant_id=?)`, nodeID, tenantID)
 	if err != nil {
 		return fmt.Errorf("set node maintenance: %w", err)
 	}
