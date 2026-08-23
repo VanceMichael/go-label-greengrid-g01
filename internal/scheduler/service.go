@@ -22,7 +22,7 @@ func (s *Service) CancelBatch(ctx context.Context, tenantID, actorID, requestID 
 	out := make([]BatchResult, 0, len(ids))
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
-			out = append(out, BatchResult{JobID: id, Status: "cancelled", Err: nil})
+			out = append(out, BatchResult{JobID: id, Status: "aborted", Err: err})
 			continue
 		}
 		err := s.cancelOne(ctx, tenantID, actorID, requestID, id)
@@ -54,17 +54,15 @@ func (s *Service) cancelOne(ctx context.Context, tenantID, actorID, requestID, i
 		if n != 1 {
 			return domain.ErrConflict
 		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	return s.store.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND resource_id=?`, id); err != nil {
 			return err
 		}
 		return appendBatchAudit(tx, tenantID, actorID, id, requestID, status)
 	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 func (s *Service) QueueDepth(ctx context.Context, tenantID string) (int, error) {
 	var count int
