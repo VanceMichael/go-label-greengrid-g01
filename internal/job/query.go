@@ -86,12 +86,22 @@ func (q *Query) List(ctx context.Context, tenantID, status string, page paginati
 	return pagination.Result[domain.Job]{Items: out, Meta: pagination.Meta{Total: total, Limit: page.Limit, Offset: page.Offset}}, rows.Err()
 }
 func (q *Query) RecoverExpiredLeases(ctx context.Context, now time.Time) (int, error) {
-	result, err := q.store.DB().ExecContext(ctx, `UPDATE jobs SET status='queued',version=version+1 WHERE status IN ('claimed','running') AND id IN (SELECT resource_id FROM leases WHERE resource_type='job' AND expires_at<=?)`, now.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, fmt.Errorf("recover jobs: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
+	var n int
+	err := q.store.WithTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status='queued',version=version+1 WHERE status IN ('claimed','running') AND id IN (SELECT resource_id FROM leases WHERE resource_type='job' AND expires_at<=?)`, now.UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("recover jobs: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		n = int(affected)
+		// Converge ownership with the queued status so a worker resuming the
+		// job is not left blocked by the dead owner's expired lease row.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND expires_at<=?`, now.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		return nil
+	})
+	return n, err
 }
 func (q *Query) Find(ctx context.Context, id string) (domain.Job, error) {
 	var j domain.Job

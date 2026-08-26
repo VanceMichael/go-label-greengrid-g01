@@ -214,12 +214,23 @@ func (s *Service) ReleaseLease(ctx context.Context, workerID, jobID string) erro
 }
 
 func (s *Service) RequeueExpired(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.store.DB().ExecContext(ctx, `UPDATE jobs SET status='queued',version=version+1 WHERE status IN ('claimed','running') AND id IN (SELECT resource_id FROM leases WHERE resource_type='job' AND expires_at<=?)`, now.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, err
-	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
+	var n int
+	err := s.store.WithTx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status='queued',version=version+1 WHERE status IN ('claimed','running') AND id IN (SELECT resource_id FROM leases WHERE resource_type='job' AND expires_at<=?)`, now.UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return err
+		}
+		affected, _ := result.RowsAffected()
+		n = int(affected)
+		// Drop the expired job lease so ownership converges with the queued
+		// status; otherwise a worker restarting into the job inherits the
+		// dead owner's stale lease row and is blocked at start/finish.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE resource_type='job' AND expires_at<=?`, now.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		return nil
+	})
+	return n, err
 }
 
 func (s *Service) Get(ctx context.Context, tenantID, id string) (domain.Job, error) {
