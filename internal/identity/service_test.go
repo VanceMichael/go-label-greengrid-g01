@@ -100,6 +100,23 @@ func TestAuthenticationRejectsWrongExpiredAndRevoked(t *testing.T) {
 	}
 }
 
+func TestAuthenticateTokenRespectsRequestCancellation(t *testing.T) {
+	s := identityServices(t)
+	ctx := context.Background()
+	tenant, _ := s.Identity.CreateTenant(ctx, "tenant")
+	_, _ = s.Identity.CreateUser(ctx, tenant, "user@example.com", "User", "correct", domain.RoleScheduler)
+	session, _, err := s.Identity.Authenticate(ctx, "user@example.com", "correct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-cancel the request context as if the upstream caller disconnected.
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := s.Identity.AuthenticateToken(cancelledCtx, session.TokenHash); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation did not propagate to session lookup: %v", err)
+	}
+}
+
 func TestDeactivateUserIsAtomicAndRevokesAllSessions(t *testing.T) {
 	s := identityServices(t)
 	ctx := context.Background()

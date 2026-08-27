@@ -102,8 +102,13 @@ func (s *Service) AuthenticateToken(ctx context.Context, token string) (domain.U
 	var expires, created string
 	var revoked, active int
 	var sessionCreated string
-	queryContext := authenticationQueryContext(ctx)
-	err := s.store.DB().QueryRowContext(queryContext, `SELECT u.id,u.tenant_id,u.email,u.display_name,u.role,u.active,u.created_at,s.id,s.expires_at,s.revoked,s.created_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`, hashToken(token)).Scan(&user.ID, &user.TenantID, &user.Email, &user.DisplayName, &user.Role, &active, &created, &session.ID, &expires, &revoked, &sessionCreated)
+	// Use the caller's context verbatim. Stripping cancellation here (e.g. via
+	// context.WithoutCancel) detaches the session lookup from the request
+	// lifecycle, so an upstream-cancelled request keeps reading user session
+	// data until the query completes. The SQLite driver honors ctx.Done() to
+	// interrupt the running statement and return ctx.Err(), which statusFor
+	// then maps to 499 (context.Canceled) instead of stalling the request.
+	err := s.store.DB().QueryRowContext(ctx, `SELECT u.id,u.tenant_id,u.email,u.display_name,u.role,u.active,u.created_at,s.id,s.expires_at,s.revoked,s.created_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`, hashToken(token)).Scan(&user.ID, &user.TenantID, &user.Email, &user.DisplayName, &user.Role, &active, &created, &session.ID, &expires, &revoked, &sessionCreated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.User{}, domain.Session{}, domain.ErrForbidden
 	}
